@@ -3,7 +3,7 @@ from collections import Counter
 import xraydb
 import re
 import os
-from tools.ptable_dict import ptable, aff_dict
+from ptable_dict import ptable, aff_dict
 
 def str_to_bool(input_str):
     if input_str.lower() == 'true':

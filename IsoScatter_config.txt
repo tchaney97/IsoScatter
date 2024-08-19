@@ -1,0 +1,8 @@
+    input_filepath=./test_files/example.xyz
+    filetype=xyz
+    gen_name=test
+    q_min=0.07
+    q_max=4
+    num_qs=400
+    logspace_q=True
+    energy=12000
