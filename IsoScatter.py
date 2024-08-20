@@ -6,11 +6,10 @@ from scipy.spatial import ConvexHull
 import matplotlib.pyplot as plt
 from tqdm.auto import tqdm
 import numpy as np
-import dask.array as da
-from scipy.spatial.distance import pdist, squareform
+from scipy.spatial.distance import pdist, cdist, squareform
 import xraydb
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import numexpr as ne
+from multiprocessing import Pool, shared_memory
 
 from ptable_dict import ptable, inverse_ptable, aff_dict
 from utilities import load_xyz, load_pdb, most_common_element, get_element_f0_dict, get_element_f1_f2_dict, find_nearest_index
@@ -18,9 +17,9 @@ from utilities import load_xyz, load_pdb, most_common_element, get_element_f0_di
 
 def compute_sq_for_q(q_val, rij_matrix, f0_q_elements):
     f0_q = f0_q_elements[:, q_val[1]]  # Atomic scattering factors for this q value
-    rij_q = rij_matrix * q_val[0]  # Pre-multiply rij by q_val to avoid repetitive computation
-    sinc_rij_q = np.sinc(rij_q / np.pi)  # np.sinc includes division by pi
-    return np.sum(np.outer(f0_q, f0_q) * sinc_rij_q)
+    # Pre-multiply rij by q_val to avoid repetitive computation
+    # np.sinc includes division by pi
+    return np.sum(np.outer(f0_q, f0_q) * np.sinc(rij_matrix * q_val[0] / np.pi))
 
 def sq_with_f0_thread(pos, elements, f0_scales, qs, num_cpus):
     nbins = len(qs)
@@ -39,7 +38,67 @@ def sq_with_f0_thread(pos, elements, f0_scales, qs, num_cpus):
 
     return sq
 
-def xyz_simulation(xyz_path, qs, vol_pct, solvent_edens, num_cpus, hull_method=True):
+def thread_sq_for_q(q_val, pos_block, f0_q_elements):
+    rij_matrix = squareform(pdist(pos_block, metric='euclidean'))
+    f0_q = f0_q_elements[:, q_val[1]]  # Atomic scattering factors for this q value
+    # Pre-multiply rij by q_val to avoid repetitive computation
+    # np.sinc includes division by pi
+    return np.sum(np.outer(f0_q, f0_q) * np.sinc(rij_matrix * q_val[0] / np.pi))
+
+def mp_sq_for_q(args):
+    i, q_val, pos_block, pos, f0_q_elements_block, f0_q_elements = args
+    # code here to calculate pdist between pos_bloc
+    rij_matrix = cdist(pos_block, pos, metric='euclidean')
+    f0_q_block = f0_q_elements_block[:, i]  # Atomic scattering factors for this q value
+    f0_q = f0_q_elements[:, i]  # Atomic scattering factors for this q value
+    # Pre-multiply rij by q_val to avoid repetitive computation
+    # np.sinc includes division by pi
+    sq = np.sum(np.outer(f0_q_block, f0_q) * np.sinc(rij_matrix * q_val / np.pi))
+    return (q_val, sq)
+
+def sq_with_f0_block(pos, elements, f0_scales, qs, block_size, num_cpus):
+    nbins = len(qs)
+    sq_sum = np.zeros(nbins)
+    unique_elements = np.unique(elements)
+    f0_dict = {element: np.array([xraydb.f0(element, q/(4 * np.pi))[0] for q in qs]) for element in unique_elements}
+    f0_q_elements = np.array([f0_dict[element] for element in elements])
+    if isinstance(f0_scales, np.ndarray):
+        f0_q_elements *= f0_scales[:, np.newaxis]
+
+    if len(pos)%block_size == 0:
+        num_blocks = int(len(pos)/block_size)
+    else:
+        num_blocks = int(len(pos)//block_size + 1)
+    pos_blocks = np.array_split(pos, num_blocks)
+    f0_q_elements_blocks = np.array_split(f0_q_elements, num_blocks)
+
+    # Multiprocessing
+    for block_num, pos_block in enumerate(tqdm(pos_blocks)):
+        f0_q_elements_block = f0_q_elements_blocks[block_num]
+        args = [(i, q_val, pos_block, pos, f0_q_elements_block, f0_q_elements) for i, q_val in enumerate(qs)]
+        with Pool(processes=num_cpus) as pool:
+            qval_sq = pool.map(mp_sq_for_q, args)
+        sq_qval_sorted = np.asarray(sorted(qval_sq, key=lambda x: x[0]))
+        sq = sq_qval_sorted[:,1]
+        q_vals = sq_qval_sorted[:,0]
+        if np.any(q_vals!=qs):
+            print(np.shape(q_vals))
+            print(np.shape(qs))
+            raise Exception('q value arrays not matching')
+    
+        # add sq values to the sum
+        sq_sum += sq
+
+    return sq_sum
+
+    # Threading
+    # with ThreadPoolExecutor(max_workers=num_cpus) as executor:  # Adjust max_workers to your environment
+    #     futures = {executor.submit(thread_sq_for_q, (q_val, i), pos_block, f0_q_elements): i for i, q_val in enumerate(qs)}
+    #     for future in tqdm(as_completed(futures), total=len(futures)):
+    #         sq[futures[future]] = future.result()
+
+
+def xyz_simulation(xyz_path, qs, vol_pct, solvent_edens, num_cpus, block_size, hull_method=True):
     """
     Calculates the scattering intensity I(q) for a given molecular structure in an xyz file,
     concentration, and background solvent electron density. Molecular volume is calculated via
@@ -99,7 +158,11 @@ def xyz_simulation(xyz_path, qs, vol_pct, solvent_edens, num_cpus, hull_method=T
         debye_species = np.array(symbols)
 
     # Compute scattering profile
-    sq_vals = sq_with_f0_thread(debye_scatterers, debye_species, f0_scales, qs, num_cpus)
+    if block_size:
+        sq_vals = sq_with_f0_block(debye_scatterers, debye_species, f0_scales, qs, block_size, num_cpus)
+    else:
+        sq_vals = sq_with_f0_thread(debye_scatterers, debye_species, f0_scales, qs, num_cpus)
+        print(sq_vals[5])
 
     #add correction factors in
     if hull_method:
