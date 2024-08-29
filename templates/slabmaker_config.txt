@@ -1,0 +1,12 @@
+input_filepath=/Users/keithwhite/repos/IsoScatter/example/PbI2_DMSO_0p8M_berendsen_last_frame_update.xyz
+output_folder=/Users/keithwhite/repos/IsoScatter/example/
+gen_name=pbi2_dmso_0p8m_slab_
+x_size=150
+y_size=150
+z_size=150
+a=53.45
+b=53.45
+c=53.45
+alpha=90
+beta=90
+gamma=90
